@@ -96,7 +96,10 @@ API available at: `http://localhost:3001/api`
 | GET | `/jobs/:id` | Get job details |
 | POST | `/jobs` | Create new download job |
 | POST | `/jobs/:id/cancel` | Cancel a job |
-| DELETE | `/jobs/:id` | Delete a job |
+| DELETE | `/jobs/:id` | Delete a job (also wipes its staged server files) |
+| GET | `/jobs/:id/files/:index` | Save a finished file to your device |
+| DELETE | `/jobs/:id/files` | Wipe all staged files of a job (keeps record) |
+| DELETE | `/jobs/:id/files/:index` | Wipe one staged file of a job |
 | POST | `/playlist/info` | Get playlist info |
 | POST | `/video/info` | Get video info |
 | POST | `/transcript` | Get video transcript |

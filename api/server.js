@@ -332,6 +332,63 @@ async function executeDownloadJob(jobId) {
   }
 }
 
+// ---------- Transient staging helpers ----------
+// Files on the standalone server are staging only: the user pulls them
+// to their own disk, then the server copy is wiped (explicitly, on job
+// delete, or by the retention sweep below).
+
+function deleteJobFiles(job) {
+  if (!job || !Array.isArray(job.items)) return 0;
+  let removed = 0;
+  for (const item of job.items) {
+    try {
+      if (item && item.file && fs.existsSync(item.file)) {
+        fs.unlinkSync(item.file);
+        removed++;
+      }
+    } catch (e) {
+      console.error('Failed to delete staged file:', item && item.file, e.message);
+    }
+  }
+  job.items = [];
+  return removed;
+}
+
+// Attach live file metadata (size / presence) so the UI can show
+// "Save to device" only for files actually on the server.
+function enrichJob(job) {
+  return {
+    ...job,
+    items: (job.items || []).map((item) => {
+      let size = null;
+      let onServer = false;
+      try {
+        if (item && item.file && fs.existsSync(item.file)) {
+          onServer = true;
+          size = fs.statSync(item.file).size;
+        }
+      } catch (e) { /* treat as missing */ }
+      return { ...item, size, onServer };
+    }),
+  };
+}
+
+const FILE_RETENTION_HOURS = parseFloat(process.env.FILE_RETENTION_HOURS || '24');
+const SWEEP_INTERVAL_MINUTES = parseFloat(process.env.SWEEP_INTERVAL_MINUTES || '60');
+
+function sweepStagedFiles() {
+  const now = Date.now();
+  const maxAge = FILE_RETENTION_HOURS * 3600 * 1000;
+  for (const job of jobs.values()) {
+    if (job.endTime && now - job.endTime > maxAge && job.items && job.items.length > 0) {
+      const removed = deleteJobFiles(job);
+      if (removed > 0) console.log(`[sweep] removed ${removed} staged file(s) from job ${job.id}`);
+    }
+  }
+}
+
+setInterval(sweepStagedFiles, Math.max(SWEEP_INTERVAL_MINUTES, 1) * 60 * 1000);
+
 // ============ API ROUTES ============
 
 // Health check
@@ -341,7 +398,9 @@ app.get('/api/health', (req, res) => {
 
 // Get all jobs
 app.get('/api/jobs', (req, res) => {
-  const allJobs = Array.from(jobs.values()).sort((a, b) => b.startTime - a.startTime);
+  const allJobs = Array.from(jobs.values())
+    .sort((a, b) => b.startTime - a.startTime)
+    .map(enrichJob);
   res.json(allJobs);
 });
 
@@ -349,7 +408,7 @@ app.get('/api/jobs', (req, res) => {
 app.get('/api/jobs/:id', (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+  res.json(enrichJob(job));
 });
 
 // Create new download job
@@ -393,10 +452,52 @@ app.post('/api/jobs/:id/cancel', (req, res) => {
   res.json(job);
 });
 
-// Delete job
+// Delete job (and wipe its staged files so server disk never fills up)
 app.delete('/api/jobs/:id', (req, res) => {
-  const deleted = jobs.delete(req.params.id);
-  if (!deleted) return res.status(404).json({ error: 'Job not found' });
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  deleteJobFiles(job);
+  jobs.delete(req.params.id);
+  res.json({ success: true });
+});
+
+// Delete ALL staged files of a job (keeps the job record)
+app.delete('/api/jobs/:id/files', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const removed = deleteJobFiles(job);
+  res.json({ success: true, removed });
+});
+
+// Download a finished file to the user's device.
+// Index-based lookup into the job's own record — no user-supplied
+// paths, so no directory-traversal risk.
+app.get('/api/jobs/:id/files/:index', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const item = job.items && job.items[Number(req.params.index)];
+  if (!item || !item.file) return res.status(404).json({ error: 'File not found' });
+  if (!fs.existsSync(item.file)) return res.status(410).json({ error: 'File no longer on server' });
+
+  res.download(item.file, path.basename(item.file));
+});
+
+// Delete ONE staged file of a job (keeps the job record)
+app.delete('/api/jobs/:id/files/:index', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const idx = Number(req.params.index);
+  const item = job.items && job.items[idx];
+  if (!item || !item.file) return res.status(404).json({ error: 'File not found' });
+
+  try {
+    if (fs.existsSync(item.file)) fs.unlinkSync(item.file);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  job.items.splice(idx, 1);
   res.json({ success: true });
 });
 

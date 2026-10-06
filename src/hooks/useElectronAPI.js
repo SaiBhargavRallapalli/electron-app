@@ -1,6 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 
-const API_BASE = 'http://localhost:3001/api';
+// Override with e.g. VITE_API_URL=https://your-api.onrender.com/api
+// when the frontend is hosted separately from the API server.
+export const API_BASE =
+  import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+
+export const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  API_BASE.replace(/^http/, 'ws').replace(/\/api$/, '');
+
+export const fileUrl = (jobId, index) =>
+  `${API_BASE}/jobs/${encodeURIComponent(jobId)}/files/${index}`;
 
 const isElectron = () =>
   typeof window !== 'undefined' && !!window.electronAPI;
@@ -20,6 +30,15 @@ async function apiPost(endpoint, body = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: 'Request failed' }));
+    throw new Error(err.error || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function apiDelete(endpoint) {
+  const res = await fetch(`${API_BASE}${endpoint}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: 'Request failed' }));
     throw new Error(err.error || err.message || `HTTP ${res.status}`);
@@ -95,6 +114,18 @@ export function useElectronAPI() {
     return null;
   }, []);
 
+  // Wipe ONE staged file from the server (after the user saved it locally).
+  // The Electron app also hosts this same REST API on :3001, so plain
+  // REST works in both modes.
+  const deleteServerFile = useCallback(async (jobId, index) => {
+    return apiDelete(`/jobs/${encodeURIComponent(jobId)}/files/${index}`);
+  }, []);
+
+  // Wipe ALL staged files of a job from the server (keeps the record).
+  const clearServerFiles = useCallback(async (jobId) => {
+    return apiDelete(`/jobs/${encodeURIComponent(jobId)}/files`);
+  }, []);
+
   return {
     isBrowser: !isElectron(),
     selectDirectory,
@@ -106,12 +137,14 @@ export function useElectronAPI() {
     getVideoInfo,
     getTranscript,
     openFolder,
+    deleteServerFile,
+    clearServerFiles,
   };
 }
 
 // REST API hook
 export function useAPI() {
-  const baseURL = 'http://localhost:3001/api';
+  const baseURL = API_BASE;
 
   const request = useCallback(async (endpoint, options = {}) => {
     const response = await fetch(`${baseURL}${endpoint}`, {
@@ -168,7 +201,7 @@ export function useWebSocket(jobId) {
   useEffect(() => {
     if (!jobId) return;
 
-    const websocket = new WebSocket('ws://localhost:3001');
+    const websocket = new WebSocket(WS_URL);
 
     websocket.onopen = () => {
       setConnected(true);

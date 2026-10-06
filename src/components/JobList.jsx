@@ -1,5 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { useElectronAPI } from '../hooks/useElectronAPI';
+import { useElectronAPI, fileUrl } from '../hooks/useElectronAPI';
+
+function formatBytes(bytes) {
+  if (bytes == null) return '';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+const baseName = (p) => String(p || '').split(/[\\/]/).pop();
 
 export function JobList({ jobs, onRefresh }) {
   const { cancelJob, openFolder, getJob } = useElectronAPI();
@@ -132,6 +142,7 @@ export function JobList({ jobs, onRefresh }) {
                 job={job}
                 onCancel={() => cancelJob(job.id)}
                 onOpenFolder={() => openFolder(job.options.outputDir)}
+                onRefresh={onRefresh}
                 onClick={() => setSelectedJob(job.id === selectedJob ? null : job.id)}
                 isSelected={selectedJob === job.id}
                 formatTime={formatTime}
@@ -147,9 +158,25 @@ export function JobList({ jobs, onRefresh }) {
   );
 }
 
-function JobRow({ job, onCancel, onOpenFolder, onClick, isSelected, formatTime, formatDuration, getStatusColor, getStatusIcon }) {
+function JobRow({ job, onCancel, onOpenFolder, onRefresh, onClick, isSelected, formatTime, formatDuration, getStatusColor, getStatusIcon }) {
+  const { isBrowser, clearServerFiles } = useElectronAPI();
+  const [clearing, setClearing] = useState(false);
   const progress = job.progress || 0;
   const isRunning = job.status === 'running' || job.status === 'pending';
+
+  const handleClearServerFiles = async (e) => {
+    e.stopPropagation();
+    if (!window.confirm('Delete all staged files for this job from the server? (Your local copies are unaffected.)')) return;
+    setClearing(true);
+    try {
+      await clearServerFiles(job.id);
+      onRefresh();
+    } catch (err) {
+      alert(`Failed to clear server files: ${err.message}`);
+    } finally {
+      setClearing(false);
+    }
+  };
 
   return (
     <>
@@ -257,14 +284,49 @@ function JobRow({ job, onCancel, onOpenFolder, onClick, isSelected, formatTime, 
           
           {job.items && job.items.length > 0 && (
             <div className="mt-4">
-              <p className="text-[var(--text-muted)] text-sm mb-2">Downloaded Files:</p>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[var(--text-muted)] text-sm">
+                  Downloaded Files
+                  {isBrowser && (
+                    <span className="text-xs"> (staging on server — save locally, then clear)</span>
+                  )}:
+                </p>
+                {isBrowser && (
+                  <button
+                    onClick={handleClearServerFiles}
+                    disabled={clearing}
+                    className="px-3 py-1.5 text-xs text-[var(--warning)] hover:bg-[var(--warning)]/10 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {clearing ? 'Clearing…' : 'Clear server files'}
+                  </button>
+                )}
+              </div>
               <div className="max-h-40 overflow-y-auto space-y-1">
                 {job.items.map((item, i) => (
                   <div key={i} className="flex items-center gap-2 text-sm">
-                    <svg className="w-4 h-4 text-[var(--success)]" fill="currentColor" viewBox="0 0 20 20">
+                    <svg className="w-4 h-4 shrink-0 text-[var(--success)]" fill="currentColor" viewBox="0 0 20 20">
                       <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
                     </svg>
-                    <span className="font-mono text-xs truncate flex-1">{item.file}</span>
+                    <span className="font-mono text-xs truncate flex-1" title={item.file}>
+                      {baseName(item.file)}
+                      {item.size != null && (
+                        <span className="text-[var(--text-muted)]"> · {formatBytes(item.size)}</span>
+                      )}
+                      {item.onServer === false && (
+                        <span className="text-[var(--warning)]"> · removed from server</span>
+                      )}
+                    </span>
+                    {isBrowser && item.onServer !== false && (
+                      <a
+                        href={fileUrl(job.id, i)}
+                        download={baseName(item.file)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="shrink-0 px-3 py-1 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/10 rounded-lg transition-colors"
+                        title="Save this file to your device"
+                      >
+                        Save
+                      </a>
+                    )}
                   </div>
                 ))}
               </div>

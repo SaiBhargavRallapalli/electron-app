@@ -208,9 +208,30 @@ router.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Attach live file metadata (size / presence) so the UI can show
+// "Save to device" only for files actually on disk.
+function enrichJob(job) {
+  return {
+    ...job,
+    items: (job.items || []).map((item) => {
+      let size = null;
+      let onServer = false;
+      try {
+        if (item && item.file && fs.existsSync(item.file)) {
+          onServer = true;
+          size = fs.statSync(item.file).size;
+        }
+      } catch (e) { /* treat as missing */ }
+      return { ...item, size, onServer };
+    }),
+  };
+}
+
 // Get all download jobs
 router.get('/jobs', (req, res) => {
-  const allJobs = Array.from(jobs.values()).sort((a, b) => b.startTime - a.startTime);
+  const allJobs = Array.from(jobs.values())
+    .sort((a, b) => b.startTime - a.startTime)
+    .map(enrichJob);
   res.json(allJobs);
 });
 
@@ -218,7 +239,46 @@ router.get('/jobs', (req, res) => {
 router.get('/jobs/:id', (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+  res.json(enrichJob(job));
+});
+
+// Download a finished file to the user's device.
+// Index-based lookup into the job's own record — no user-supplied
+// paths, so no directory-traversal risk.
+router.get('/jobs/:id/files/:index', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const item = job.items && job.items[Number(req.params.index)];
+  if (!item || !item.file) return res.status(404).json({ error: 'File not found' });
+  if (!fs.existsSync(item.file)) return res.status(410).json({ error: 'File no longer on server' });
+
+  res.download(item.file, path.basename(item.file));
+});
+
+// Delete ONE staged file of a job (keeps the job record).
+// NOTE: embedded/Electron mode only removes the record entry — it never
+// unlinks, because here the output folder is the user's own destination.
+// (The standalone server unlinks; see api/server.js.)
+router.delete('/jobs/:id/files/:index', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const idx = Number(req.params.index);
+  if (!job.items || !job.items[idx]) return res.status(404).json({ error: 'File not found' });
+
+  job.items.splice(idx, 1);
+  res.json({ success: true });
+});
+
+// Delete ALL staged-file records of a job (keeps the job record).
+// Same NOTE as above: record-only in embedded mode.
+router.delete('/jobs/:id/files', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const removed = (job.items || []).length;
+  job.items = [];
+  res.json({ success: true, removed });
 });
 
 // Create new download job
